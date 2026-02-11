@@ -5,16 +5,8 @@
       "args": ["mcp-server-fetch"],
       "env": {}
     },
-    "mcp-youtube": {
-      "command": "npx",
-      "args": ["@anaisbetts/mcp-youtube"]
-    },
-    "time": {
-      "command": "uvx",
-      "args": ["mcp-server-time", "--local-timezone=Asia/Seoul"]
-    },
-    "docs-langchain": {
-      "url": "https://docs.langchain.com/mcp"
+    "mcp-chat Docs": {
+      "url": "https://gitmcp.io/Homin0321/mcp-chat"
     },
     "MCP-UI Docs": {
       "command": "npx",

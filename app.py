@@ -33,6 +33,13 @@ def create_new_chat():
         "messages": [],
         "server": st.session_state.get("selected_server", "None"),
     }
+    if "selected_server" in st.session_state:
+        st.session_state.chat["messages"].append(
+            {
+                "role": "assistant",
+                "content": f"Connected to server: {st.session_state.get('selected_server', 'None')}",
+            }
+        )
 
 
 # Load config file
@@ -95,57 +102,55 @@ def create_server_parameters(server_config: Dict[str, Any]) -> Any:
 
 
 async def safe_inspect_server(session: ClientSession):
-    """Safely inspect the server."""
-    with st.sidebar.expander("🔎 MCP Server Inspection"):
-        # Prompts inspection
-        st.subheader("📑 Prompts")
-        try:
-            prompts = await asyncio.wait_for(session.list_prompts(), timeout=5.0)
-            if prompts and prompts.prompts:
-                prompt_list = [
-                    f"- **{p.name}**: {p.description or 'No description'}"
-                    for p in prompts.prompts
-                ]
-                st.markdown("\n".join(prompt_list))
-            else:
-                st.info("No available prompts.")
-        except asyncio.TimeoutError:
-            st.warning("Prompt list request timed out")
-        except Exception as e:
-            st.warning(f"Unable to fetch prompt list: {e}")
+    """Safely inspect the server and store in session state."""
+    inspection: Dict[str, Any] = {
+        "prompts": None,
+        "prompts_error": None,
+        "resources": None,
+        "resources_error": None,
+        "tools": None,
+        "tools_error": None,
+    }
 
-        # Resources inspection
-        st.subheader("📂 Resources")
-        try:
-            resources = await asyncio.wait_for(session.list_resources(), timeout=5.0)
-            if resources and resources.resources:
-                resource_list = [
-                    f"- `{r.uri}`: {r.name or 'No name'}" for r in resources.resources
-                ]
-                st.markdown("\n".join(resource_list))
-            else:
-                st.info("No available resources.")
-        except asyncio.TimeoutError:
-            st.warning("Resource list request timed out")
-        except Exception as e:
-            st.warning(f"Unable to fetch resource list: {e}")
+    # Prompts inspection
+    try:
+        prompts = await asyncio.wait_for(session.list_prompts(), timeout=5.0)
+        if prompts and prompts.prompts:
+            inspection["prompts"] = [
+                f"- **{p.name}**: {p.description or 'No description'}"
+                for p in prompts.prompts
+            ]
+    except asyncio.TimeoutError:
+        inspection["prompts_error"] = "Prompt list request timed out"
+    except Exception as e:
+        inspection["prompts_error"] = f"Unable to fetch prompt list: {e}"
 
-        # Tools inspection
-        st.subheader("🛠️ Tools")
-        try:
-            tools = await asyncio.wait_for(session.list_tools(), timeout=5.0)
-            if tools and tools.tools:
-                tool_list = [
-                    f"- **{t.name}**: {t.description or 'No description'}"
-                    for t in tools.tools
-                ]
-                st.markdown("\n".join(tool_list))
-            else:
-                st.info("No available tools.")
-        except asyncio.TimeoutError:
-            st.warning("Tool list request timed out")
-        except Exception as e:
-            st.warning(f"Unable to fetch tool list: {e}")
+    # Resources inspection
+    try:
+        resources = await asyncio.wait_for(session.list_resources(), timeout=5.0)
+        if resources and resources.resources:
+            inspection["resources"] = [
+                f"- `{r.uri}`: {r.name or 'No name'}" for r in resources.resources
+            ]
+    except asyncio.TimeoutError:
+        inspection["resources_error"] = "Resource list request timed out"
+    except Exception as e:
+        inspection["resources_error"] = f"Unable to fetch resource list: {e}"
+
+    # Tools inspection
+    try:
+        tools = await asyncio.wait_for(session.list_tools(), timeout=5.0)
+        if tools and tools.tools:
+            inspection["tools"] = [
+                f"- **{t.name}**: {t.description or 'No description'}"
+                for t in tools.tools
+            ]
+    except asyncio.TimeoutError:
+        inspection["tools_error"] = "Tool list request timed out"
+    except Exception as e:
+        inspection["tools_error"] = f"Unable to fetch tool list: {e}"
+
+    st.session_state.server_inspection = inspection
 
 
 @asynccontextmanager
@@ -443,6 +448,7 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
 
 async def initialize_session_safely(server_params: Any):
     """Safely initialize session."""
+    st.session_state.server_inspection = None
     if not server_params:
         return
 
@@ -498,20 +504,48 @@ def main():
             else:
                 st.info("No server selected.")
 
-    # Reinitialize session on server change
-    if ("selected_server" not in st.session_state) or (
-        st.session_state.selected_server != selected_server
-    ):
-        with st.spinner("Connecting to server..."):
-            asyncio.run(initialize_session_safely(server_params))
-        st.session_state.selected_server = selected_server
-        # Add assistant message to chat
-        st.session_state.chat["messages"].append(
-            {
-                "role": "assistant",
-                "content": f"Connected to server: {st.session_state.get('selected_server', 'None')}",
-            }
-        )
+        # Reinitialize session on server change
+        if ("selected_server" not in st.session_state) or (
+            st.session_state.selected_server != selected_server
+        ):
+            with st.spinner("Connecting to server..."):
+                asyncio.run(initialize_session_safely(server_params))
+            st.session_state.selected_server = selected_server
+            # Add assistant message to chat
+            st.session_state.chat["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": f"Connected to server: {st.session_state.get('selected_server', 'None')}",
+                }
+            )
+
+        if st.session_state.get("server_inspection"):
+            with st.expander("🔎 MCP Server Inspection"):
+                insp = st.session_state.server_inspection
+
+                st.subheader("📑 Prompts")
+                if insp.get("prompts_error"):
+                    st.warning(insp["prompts_error"])
+                elif insp.get("prompts"):
+                    st.markdown("\n".join(insp["prompts"]))
+                else:
+                    st.info("No available prompts.")
+
+                st.subheader("📂 Resources")
+                if insp.get("resources_error"):
+                    st.warning(insp["resources_error"])
+                elif insp.get("resources"):
+                    st.markdown("\n".join(insp["resources"]))
+                else:
+                    st.info("No available resources.")
+
+                st.subheader("🛠️ Tools")
+                if insp.get("tools_error"):
+                    st.warning(insp["tools_error"])
+                elif insp.get("tools"):
+                    st.markdown("\n".join(insp["tools"]))
+                else:
+                    st.info("No available tools.")
 
     # Display chat history
     messages = st.session_state.chat["messages"]

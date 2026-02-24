@@ -16,12 +16,20 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.shared.message import SessionMessage
 
+from utils import fix_markdown_symbol_issue
+
 # Page settings
 st.set_page_config(page_title="MCP Chat", page_icon="🤖", layout="wide")
 
 # Load environment variables and initialize client
-GEMINI_MODEL = "gemini-flash-lite-latest"
-
+MODEL_OPTIONS = [
+    "gemini-flash-lite-latest",
+    "gemini-3-flash-preview",
+    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+]
 
 load_dotenv()
 
@@ -321,6 +329,7 @@ async def get_mcp_session(server_params: Any):
 
 async def send_message_with_mcp(prompt: str, server_params: Any):
     """Send message with MCP server using Gemini chat."""
+    model_name = st.session_state.get("selected_model", MODEL_OPTIONS[0])
     client = genai.Client()
     try:
         async with get_mcp_session(server_params) as session:
@@ -356,7 +365,7 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
             with st.spinner("Generating response..."):
                 response = await asyncio.wait_for(
                     client.aio.models.generate_content(
-                        model=GEMINI_MODEL,
+                        model=model_name,
                         contents=contents,
                         config=config,
                     ),
@@ -420,7 +429,7 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
                 with st.spinner("Generating response..."):
                     response = await asyncio.wait_for(
                         client.aio.models.generate_content(
-                            model=GEMINI_MODEL,
+                            model=model_name,
                             contents=contents,
                             config=config,
                         ),
@@ -428,10 +437,11 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
                     )
 
             if response and response.text:
+                fixed_text = fix_markdown_symbol_issue(response.text)
                 with st.chat_message("assistant"):
-                    st.markdown(response.text)
+                    st.markdown(fixed_text)
                 st.session_state.chat["messages"].append(
-                    {"role": "assistant", "content": response.text}
+                    {"role": "assistant", "content": fixed_text}
                 )
             else:
                 st.warning("Received empty response.")
@@ -465,6 +475,8 @@ def main():
     # MCP Server configuration in sidebar
     with st.sidebar:
         st.header("MCP Chat")
+
+        st.selectbox("Select Model", MODEL_OPTIONS, index=0, key="selected_model")
 
         if "chat" not in st.session_state:
             create_new_chat()

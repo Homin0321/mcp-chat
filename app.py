@@ -50,6 +50,17 @@ def create_new_chat():
         )
 
 
+@st.dialog("Markdown Source", width="large")
+def show_markdown():
+    if "chat" in st.session_state and st.session_state.chat.get("messages"):
+        messages = st.session_state.chat["messages"]
+        if len(messages) > 0:
+            st.code(messages[-1]["content"], language="markdown")
+            return
+
+    st.info("No messages to display.")
+
+
 # Load config file
 @st.cache_data
 def load_mcp_config() -> Dict[str, Any]:
@@ -487,12 +498,21 @@ def main():
             create_new_chat()
             st.rerun()
 
+        # Show Markdown button
+        if st.button("Show Markdown", use_container_width=True):
+            show_markdown()
+
         # Load MCP configuration
         mcp_config = load_mcp_config()
 
         # Server selection
         server_names = ["None"] + list(mcp_config["mcpServers"].keys())
-        selected_server = st.selectbox("Select MCP Server", server_names)
+        server_index = 0
+        if st.session_state.get("selected_server") in server_names:
+            server_index = server_names.index(st.session_state.selected_server)
+        selected_server = st.selectbox(
+            "Select MCP Server", server_names, index=server_index
+        )
 
         # Get server configuration
         server_config = (

@@ -5,12 +5,11 @@
       "args": ["mcp-server-fetch"],
       "env": {}
     },
-    "mcp-chat Docs": {
-      "url": "https://gitmcp.io/Homin0321/mcp-chat"
-    },
-    "MCP-UI Docs": {
-      "command": "npx",
-      "args": ["mcp-remote", "https://gitmcp.io/idosal/mcp-ui"]
-    },
+    "google-developer-knowledge": {
+      "url": "https://developerknowledge.googleapis.com/mcp",
+      "headers": {
+        "X-Goog-Api-Key": "YOUR_API_KEY_HERE"
+      }
+    }
   }
 }

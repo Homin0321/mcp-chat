@@ -1,4 +1,8 @@
 python-dotenv
-google-generativeai
+google-genai
 streamlit
 mcp
+httpx
+httpx-sse
+pydantic
+anyio

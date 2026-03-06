@@ -24,11 +24,11 @@ st.set_page_config(page_title="MCP Chat", page_icon="🤖", layout="wide")
 # Load environment variables and initialize client
 MODEL_OPTIONS = [
     "gemini-flash-lite-latest",
-    "gemini-3-flash-preview",
-    "gemini-3-pro-preview",
+    "gemini-flash-latest",
     "gemini-3.1-pro-preview",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
+    "gemini-2.5-pro",
 ]
 
 load_dotenv()

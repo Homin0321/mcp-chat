@@ -1,8 +1,8 @@
 import asyncio
 import json
 import os
-from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
 import httpx
 import pydantic
@@ -44,7 +44,7 @@ def create_new_chat():
     if "selected_server" in st.session_state:
         st.session_state.chat["messages"].append(
             {
-                "role": "assistant",
+                "role": "system",
                 "content": f"Connected to server: {st.session_state.get('selected_server', 'None')}",
             }
         )
@@ -260,82 +260,83 @@ async def http_client(url: str, headers: Dict[str, str]):
         tg.cancel_scope.cancel()
 
 
+CONNECTION_TIMEOUT = 30.0
+
+
+def _needs_http_fallback(e: Exception) -> bool:
+    """SSE에서 HTTP 통신으로 Fallback 해야 하는 에러인지 판별합니다."""
+    if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 405:
+        return True
+    if isinstance(e, SSEError):
+        return True
+
+    if hasattr(e, "exceptions"):
+        for sub_exc in getattr(e, "exceptions", []):
+            if (
+                isinstance(sub_exc, httpx.HTTPStatusError)
+                and sub_exc.response.status_code == 405
+            ):
+                return True
+            if isinstance(sub_exc, SSEError):
+                return True
+
+    return False
+
+
 @asynccontextmanager
-async def get_mcp_session(server_params: Any):
+async def get_mcp_session(
+    server_params: Union[StdioServerParameters, dict, None],
+) -> AsyncGenerator[Union[ClientSession, None], None]:
     """Context manager for safely managing MCP session."""
     if not server_params:
         yield None
         return
 
-    session_started = False
-    try:
-        if isinstance(server_params, StdioServerParameters):
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await asyncio.wait_for(session.initialize(), timeout=30.0)
-                    session_started = True
-                    yield session
+    async with AsyncExitStack() as stack:
+        try:
+            if isinstance(server_params, StdioServerParameters):
+                read, write = await stack.enter_async_context(
+                    stdio_client(server_params)
+                )
 
-        elif isinstance(server_params, dict) and "url" in server_params:
-            try:
-                # Try SSE first
-                async with sse_client(
-                    url=server_params["url"], headers=server_params.get("headers", {})
-                ) as (read, write):
-                    async with ClientSession(read, write) as session:
-                        await asyncio.wait_for(session.initialize(), timeout=30.0)
-                        session_started = True
-                        yield session
-            except Exception as e:
-                # Fallback to HTTP if SSE fails with 405 Method Not Allowed or SSEError
-                is_405 = False
-                if (
-                    isinstance(e, httpx.HTTPStatusError)
-                    and e.response.status_code == 405
-                ):
-                    is_405 = True
-                elif isinstance(e, SSEError):
-                    is_405 = True
-                elif hasattr(e, "exceptions"):
-                    for sub_exc in e.exceptions:
-                        if (
-                            isinstance(sub_exc, httpx.HTTPStatusError)
-                            and sub_exc.response.status_code == 405
-                        ):
-                            is_405 = True
-                            break
-                        if isinstance(sub_exc, SSEError):
-                            is_405 = True
-                            break
+            elif isinstance(server_params, dict) and "url" in server_params:
+                try:
+                    read, write = await stack.enter_async_context(
+                        sse_client(
+                            url=server_params["url"],
+                            headers=server_params.get("headers", {}),
+                        )
+                    )
+                except Exception as e:
+                    if _needs_http_fallback(e):
+                        read, write = await stack.enter_async_context(
+                            http_client(
+                                url=server_params["url"],
+                                headers=server_params.get("headers", {}),
+                            )
+                        )
+                    else:
+                        raise e
+            else:
+                raise ValueError("Invalid server parameters")
 
-                if is_405:
-                    async with http_client(
-                        url=server_params["url"],
-                        headers=server_params.get("headers", {}),
-                    ) as (read, write):
-                        async with ClientSession(read, write) as session:
-                            await asyncio.wait_for(session.initialize(), timeout=30.0)
-                            session_started = True
-                            yield session
-                else:
-                    raise e
-        else:
-            raise ValueError("Invalid server parameters")
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await asyncio.wait_for(session.initialize(), timeout=CONNECTION_TIMEOUT)
 
-    except asyncio.TimeoutError:
-        if session_started:
-            raise
-        st.error("MCP server connection timed out")
-        yield None
-    except Exception as e:
-        if session_started:
-            raise
-        if hasattr(e, "exceptions"):
-            for sub_exc in e.exceptions:
-                st.error(f"Failed to connect to MCP server: {sub_exc}")
-        else:
-            st.error(f"Failed to connect to MCP server: {e}")
-        yield None
+        except asyncio.TimeoutError:
+            st.error("MCP server connection timed out")
+            yield None
+            return
+        except Exception as e:
+            if hasattr(e, "exceptions"):
+                for sub_exc in getattr(e, "exceptions", []):
+                    st.error(f"Failed to connect to MCP server: {sub_exc}")
+            else:
+                st.error(f"Failed to connect to MCP server: {e}")
+            yield None
+            return
+
+        yield session
 
 
 async def send_message_with_mcp(prompt: str, server_params: Any):
@@ -358,9 +359,10 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
                     contents.append(
                         {"role": "model", "parts": [{"text": msg["content"]}]}
                     )
-
-            # Add current user prompt
-            contents.append({"role": "user", "parts": [{"text": prompt}]})
+                elif msg["role"] == "model_tool_call":
+                    contents.append({"role": "model", "parts": msg["parts"]})
+                elif msg["role"] == "tool_response":
+                    contents.append({"role": "user", "parts": msg["parts"]})
 
             # Create configuration with tools if available
             config = genai.types.GenerateContentConfig()
@@ -380,72 +382,91 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
                         contents=contents,
                         config=config,
                     ),
-                    timeout=30.0,
+                    timeout=120.0,
                 )
 
-            # Handle tool calls
-            while response.function_calls:
-                # Display tool calls
-                for call in response.function_calls:
-                    with st.chat_message("assistant"):
-                        st.markdown(f"🛠️ Calling tool: `{call.name}`")
-                        with st.expander("Arguments"):
-                            st.json(call.args)
+            # Handle AFC history
+            if getattr(response, "automatic_function_calling_history", None):
+                for content in response.automatic_function_calling_history:
+                    # Model tool call
+                    if content.role == "model" and content.parts:
+                        function_calls = [
+                            p.function_call for p in content.parts if p.function_call
+                        ]
+                        if function_calls:
+                            for call in function_calls:
+                                with st.chat_message("assistant"):
+                                    st.markdown(f"🛠️ Calling tool: `{call.name}`")
+                                    with st.expander("Arguments"):
+                                        st.json(call.args)
 
-                # Add model's function call message to history
-                model_parts = response.candidates[0].content.parts
-                contents.append({"role": "model", "parts": model_parts})
-
-                # Execute tools and collect responses
-                tool_responses = []
-                for call in response.function_calls:
-                    try:
-                        result = await session.call_tool(call.name, arguments=call.args)
-
-                        # Extract text content from result
-                        tool_output_text = ""
-                        if result.content:
-                            for content_item in result.content:
-                                if content_item.type == "text":
-                                    tool_output_text += content_item.text
-
-                        # Display tool result
-                        with st.chat_message("assistant"):
-                            with st.expander(f"Result: {call.name}"):
-                                st.markdown(tool_output_text)
-
-                        tool_responses.append(
-                            {
-                                "function_response": {
-                                    "name": call.name,
-                                    "response": {"result": tool_output_text},
+                            # Add model tool call to history
+                            st.session_state.chat["messages"].append(
+                                {
+                                    "role": "model_tool_call",
+                                    "parts": [
+                                        {
+                                            "function_call": {
+                                                "name": c.name,
+                                                "args": c.args,
+                                            }
+                                        }
+                                        for c in function_calls
+                                    ],
+                                    "function_calls": function_calls,
                                 }
-                            }
-                        )
-                    except Exception as e:
-                        st.error(f"Error executing tool {call.name}: {e}")
-                        tool_responses.append(
-                            {
-                                "function_response": {
-                                    "name": call.name,
-                                    "response": {"error": str(e)},
-                                }
-                            }
-                        )
+                            )
 
-                # Add tool responses to history
-                contents.append({"role": "tool", "parts": tool_responses})
+                    # Tool response
+                    elif content.role in ["user", "tool"] and content.parts:
+                        function_responses = [
+                            p.function_response
+                            for p in content.parts
+                            if p.function_response
+                        ]
+                        if function_responses:
+                            tool_responses = []
+                            for resp in function_responses:
+                                tool_responses.append(
+                                    {
+                                        "function_response": {
+                                            "name": resp.name,
+                                            "response": resp.response,
+                                        }
+                                    }
+                                )
+                                with st.chat_message("assistant"):
+                                    with st.expander(f"Result: {resp.name}"):
+                                        if "result" in resp.response:
+                                            res = resp.response["result"]
+                                            if (
+                                                isinstance(res, dict)
+                                                and "content" in res
+                                            ):
+                                                texts = [
+                                                    c.get("text", "")
+                                                    for c in res["content"]
+                                                    if isinstance(c, dict)
+                                                    and c.get("type") == "text"
+                                                ]
+                                                st.markdown("".join(texts))
+                                            elif hasattr(res, "content"):
+                                                texts = [
+                                                    getattr(c, "text", "")
+                                                    for c in res.content
+                                                    if getattr(c, "type", "") == "text"
+                                                ]
+                                                st.markdown("".join(texts))
+                                            else:
+                                                st.markdown(str(res))
+                                        elif "error" in resp.response:
+                                            st.error(resp.response["error"])
+                                        else:
+                                            st.markdown(str(resp.response))
 
-                # Generate next response
-                with st.spinner("Generating response..."):
-                    response = await asyncio.wait_for(
-                        client.aio.models.generate_content(
-                            model=model_name,
-                            contents=contents,
-                            config=config,
-                        ),
-                        timeout=30.0,
-                    )
+                            st.session_state.chat["messages"].append(
+                                {"role": "tool_response", "parts": tool_responses}
+                            )
 
             if response and response.text:
                 fixed_text = fix_markdown_symbol_issue(response.text)
@@ -543,10 +564,10 @@ def main():
             with st.spinner("Connecting to server..."):
                 asyncio.run(initialize_session_safely(server_params))
             st.session_state.selected_server = selected_server
-            # Add assistant message to chat
+            # Add system message to chat
             st.session_state.chat["messages"].append(
                 {
-                    "role": "assistant",
+                    "role": "system",
                     "content": f"Connected to server: {st.session_state.get('selected_server', 'None')}",
                 }
             )
@@ -582,8 +603,43 @@ def main():
     # Display chat history
     messages = st.session_state.chat["messages"]
     for message in messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        if message["role"] == "model_tool_call":
+            for call in message["function_calls"]:
+                with st.chat_message("assistant"):
+                    st.markdown(f"🛠️ Calling tool: `{call.name}`")
+                    with st.expander("Arguments"):
+                        st.json(call.args)
+        elif message["role"] == "tool_response":
+            for resp in message["parts"]:
+                func_resp = resp["function_response"]
+                with st.chat_message("assistant"):
+                    with st.expander(f"Result: {func_resp['name']}"):
+                        if "result" in func_resp["response"]:
+                            res = func_resp["response"]["result"]
+                            if isinstance(res, dict) and "content" in res:
+                                texts = [
+                                    c.get("text", "")
+                                    for c in res["content"]
+                                    if isinstance(c, dict) and c.get("type") == "text"
+                                ]
+                                st.markdown("".join(texts))
+                            elif hasattr(res, "content"):
+                                texts = [
+                                    getattr(c, "text", "")
+                                    for c in res.content
+                                    if getattr(c, "type", "") == "text"
+                                ]
+                                st.markdown("".join(texts))
+                            else:
+                                st.markdown(str(res))
+                        elif "error" in func_resp["response"]:
+                            st.error(func_resp["response"]["error"])
+                        else:
+                            st.markdown(str(func_resp["response"]))
+        else:
+            avatar = "⚙️" if message["role"] == "system" else None
+            with st.chat_message(message["role"], avatar=avatar):
+                st.markdown(message["content"])
 
     # Handle user input
     if prompt := st.chat_input("Enter your message..."):

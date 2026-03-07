@@ -34,7 +34,54 @@ MODEL_OPTIONS = [
 load_dotenv()
 
 
+def extract_grounding_info(candidate):
+    """Extract grounding and URL context information from response candidate."""
+    info = {
+        "queries": [],
+        "chunks": [],
+        "rendered_content": None,
+        "url_contexts": [],
+    }
+    
+    has_data = False
+
+    if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
+        gm = candidate.grounding_metadata
+        info["queries"] = getattr(gm, "web_search_queries", [])
+
+        if hasattr(gm, "grounding_chunks") and gm.grounding_chunks:
+            for chunk in gm.grounding_chunks:
+                if hasattr(chunk, "web") and chunk.web:
+                    title = getattr(chunk.web, "title", "Unknown Source")
+                    uri = getattr(chunk.web, "uri", "")
+                    if uri:
+                        info["chunks"].append({"title": title, "uri": uri})
+
+        if hasattr(gm, "search_entry_point") and gm.search_entry_point:
+            info["rendered_content"] = getattr(
+                gm.search_entry_point, "rendered_content", None
+            )
+
+        if info["queries"] or info["chunks"] or info["rendered_content"]:
+            has_data = True
+
+    if hasattr(candidate, "url_context_metadata") and candidate.url_context_metadata:
+        ucm = candidate.url_context_metadata
+        if hasattr(ucm, "url_metadata") and ucm.url_metadata:
+            for um in ucm.url_metadata:
+                url = getattr(um, "retrieved_url", "")
+                status = getattr(um, "url_retrieval_status", "")
+                status_str = str(status).split('.')[-1] if status else "UNKNOWN_STATUS"
+                if url:
+                    info["url_contexts"].append({"url": url, "status": status_str})
+                    has_data = True
+
+    return info if has_data else None
+
+
 # Chat management functions
+
+
 def create_new_chat():
     """Create a new chat session."""
     st.session_state.chat = {
@@ -374,6 +421,17 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
                     "Use these tools whenever necessary to fulfill the user's request. "
                     "Always answer in the language used by the user."
                 )
+            else:
+                tools = []
+                if st.session_state.get("use_google_search", False):
+                    tools.append(
+                        genai.types.Tool(google_search=genai.types.GoogleSearch())
+                    )
+                if st.session_state.get("use_url_context", False):
+                    tools.append(genai.types.Tool(url_context=genai.types.UrlContext()))
+
+                if tools:
+                    config.tools = tools
 
             with st.spinner("Generating response..."):
                 response = await asyncio.wait_for(
@@ -470,10 +528,47 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
 
             if response and response.text:
                 fixed_text = fix_markdown_symbol_issue(response.text)
+
+                grounding_info = None
+                if hasattr(response, "candidates") and response.candidates:
+                    grounding_info = extract_grounding_info(response.candidates[0])
+
                 with st.chat_message("assistant"):
                     st.markdown(fixed_text)
+
+                    if grounding_info:
+                        with st.expander("🔍 Sources & Context"):
+                            if grounding_info.get("queries"):
+                                st.markdown("**Search Queries:**")
+                                for q in grounding_info["queries"]:
+                                    st.markdown(f"- `{q}`")
+
+                            if grounding_info.get("chunks"):
+                                st.markdown("**Sources:**")
+                                for i, chunk in enumerate(grounding_info["chunks"], 1):
+                                    st.markdown(
+                                        f"{i}. [{chunk['title']}]({chunk['uri']})"
+                                    )
+
+                            if grounding_info.get("rendered_content"):
+                                st.components.v1.html(
+                                    grounding_info["rendered_content"],
+                                    height=150,
+                                    scrolling=True,
+                                )
+                                
+                            if grounding_info.get("url_contexts"):
+                                st.markdown("**URL Contexts:**")
+                                for uc in grounding_info["url_contexts"]:
+                                    status_emoji = "✅" if "SUCCESS" in uc['status'] else "❌"
+                                    st.markdown(f"- {status_emoji} [{uc['url']}]({uc['url']}) ({uc['status']})")
+
                 st.session_state.chat["messages"].append(
-                    {"role": "assistant", "content": fixed_text}
+                    {
+                        "role": "assistant",
+                        "content": fixed_text,
+                        "grounding_info": grounding_info,
+                    }
                 )
             else:
                 st.warning("Received empty response.")
@@ -542,6 +637,10 @@ def main():
             else mcp_config["mcpServers"][selected_server]
         )
         server_params = None
+
+        if selected_server == "None":
+            st.checkbox("Google Search Grounding", key="use_google_search")
+            st.checkbox("URL Context", key="use_url_context")
 
         if server_config:
             try:
@@ -640,6 +739,30 @@ def main():
             avatar = "⚙️" if message["role"] == "system" else None
             with st.chat_message(message["role"], avatar=avatar):
                 st.markdown(message["content"])
+
+                if message.get("grounding_info"):
+                    gi = message["grounding_info"]
+                    with st.expander("🔍 Sources & Context"):
+                        if gi.get("queries"):
+                            st.markdown("**Search Queries:**")
+                            for q in gi["queries"]:
+                                st.markdown(f"- `{q}`")
+
+                        if gi.get("chunks"):
+                            st.markdown("**Sources:**")
+                            for i, chunk in enumerate(gi["chunks"], 1):
+                                st.markdown(f"{i}. [{chunk['title']}]({chunk['uri']})")
+
+                        if gi.get("rendered_content"):
+                            st.components.v1.html(
+                                gi["rendered_content"], height=150, scrolling=True
+                            )
+
+                        if gi.get("url_contexts"):
+                            st.markdown("**URL Contexts:**")
+                            for uc in gi["url_contexts"]:
+                                status_emoji = "✅" if "SUCCESS" in uc['status'] else "❌"
+                                st.markdown(f"- {status_emoji} [{uc['url']}]({uc['url']}) ({uc['status']})")
 
     # Handle user input
     if prompt := st.chat_input("Enter your message..."):

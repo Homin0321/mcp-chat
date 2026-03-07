@@ -42,7 +42,7 @@ def extract_grounding_info(candidate):
         "rendered_content": None,
         "url_contexts": [],
     }
-    
+
     has_data = False
 
     if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
@@ -71,7 +71,7 @@ def extract_grounding_info(candidate):
             for um in ucm.url_metadata:
                 url = getattr(um, "retrieved_url", "")
                 status = getattr(um, "url_retrieval_status", "")
-                status_str = str(status).split('.')[-1] if status else "UNKNOWN_STATUS"
+                status_str = str(status).split(".")[-1] if status else "UNKNOWN_STATUS"
                 if url:
                     info["url_contexts"].append({"url": url, "status": status_str})
                     has_data = True
@@ -556,12 +556,16 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
                                     height=150,
                                     scrolling=True,
                                 )
-                                
+
                             if grounding_info.get("url_contexts"):
                                 st.markdown("**URL Contexts:**")
                                 for uc in grounding_info["url_contexts"]:
-                                    status_emoji = "✅" if "SUCCESS" in uc['status'] else "❌"
-                                    st.markdown(f"- {status_emoji} [{uc['url']}]({uc['url']}) ({uc['status']})")
+                                    status_emoji = (
+                                        "✅" if "SUCCESS" in uc["status"] else "❌"
+                                    )
+                                    st.markdown(
+                                        f"- {status_emoji} [{uc['url']}]({uc['url']}) ({uc['status']})"
+                                    )
 
                 st.session_state.chat["messages"].append(
                     {
@@ -650,11 +654,12 @@ def main():
                 server_params = None
 
         # Display server configuration
-        with st.expander("Server Configuration"):
-            if server_config:
-                st.json(server_config)
-            else:
-                st.info("No server selected.")
+        if selected_server != "None":
+            with st.expander("Server Configuration"):
+                if server_config:
+                    st.json(server_config)
+                else:
+                    st.info("No server selected.")
 
         # Reinitialize session on server change
         if ("selected_server" not in st.session_state) or (
@@ -761,8 +766,12 @@ def main():
                         if gi.get("url_contexts"):
                             st.markdown("**URL Contexts:**")
                             for uc in gi["url_contexts"]:
-                                status_emoji = "✅" if "SUCCESS" in uc['status'] else "❌"
-                                st.markdown(f"- {status_emoji} [{uc['url']}]({uc['url']}) ({uc['status']})")
+                                status_emoji = (
+                                    "✅" if "SUCCESS" in uc["status"] else "❌"
+                                )
+                                st.markdown(
+                                    f"- {status_emoji} [{uc['url']}]({uc['url']}) ({uc['status']})"
+                                )
 
     # Handle user input
     if prompt := st.chat_input("Enter your message..."):

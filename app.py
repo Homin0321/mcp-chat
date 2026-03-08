@@ -445,7 +445,9 @@ async def send_message_with_mcp(prompt: str, server_params: Any):
 
             # Handle AFC history
             if getattr(response, "automatic_function_calling_history", None):
-                for content in response.automatic_function_calling_history:
+                for content in response.automatic_function_calling_history[
+                    len(contents) :
+                ]:
                     # Model tool call
                     if content.role == "model" and content.parts:
                         function_calls = [
